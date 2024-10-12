@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from torch.distributions import Categorical
 from stable_baselines3.common.vec_env import VecVideoRecorder, SubprocVecEnv
-from IPython.display import clear_output
+# from IPython.display import clear_output
 from functools import total_ordering
 
 ENV_ID = "Pong-v0"
@@ -41,9 +41,9 @@ T_EPOCHS = 2 # each T_EPOCH
 N_TESTS = 20 # do N_TESTS tests
 TARGET_REWARD = 0.9
 TRANSFER_LEARNING = False
-BASELINE_PATH = f"{file_path_prefix}/ppo_test/baseline/Pong-v0_+0.896_12150.dat"
+BASELINE_PATH = f"./ppo_test/baseline/Pong-v0_+0.896_12150.dat"
 # BASELINE_PATH = "./ppo_test/baseline/Pong-v0_+0.340_100.dat"
-PATH = f"{file_path_prefix}/ppo_test/checkpoints/Pong-v0_+0.855_19700.dat"
+PATH = f"./ppo_test/checkpoints/Pong-v0_+0.855_19700.dat"
 
 class CNN(nn.Module):
     def __init__(self, num_inputs, num_outputs, hidden_size):
@@ -156,10 +156,10 @@ def test_env(i_episode, env, baseline_model, model, device):
     return (total_reward >= 21)
 
 def plot(train_epoch, rewards, save=True):
-    clear_output(True)
+    # clear_output(True)
     plt.close('all')
-    fig = plt.figure()
     fig = plt.ion()
+    fig = plt.figure()
     fig = plt.subplot(1, 1, 1)
     fig = plt.title('%s: Epoch: %s -> Reward: %s' % (ENV_ID, train_epoch, test_rewards[-1]))
     fig = plt.ylabel('Reward')
@@ -393,7 +393,7 @@ def ppo_train(baseline_model, model, envs, device, use_cuda, test_rewards, test_
                 if best_reward is not None:
                     print("Best reward updated: %.3f -> %.3f" %(best_reward, test_reward))
                     name = "%s_%+.3f_%d.dat" % (ENV_ID, test_reward, train_epoch)
-                    fname = os.path.join(file_path_prefix, 'ppo_test/checkpoints', name)
+                    fname = os.path.join('.', 'ppo_test/checkpoints', name)
                     states = {
                       'state_dict': model.state_dict(),
                       'optimizer': optimizer.state_dict(),
