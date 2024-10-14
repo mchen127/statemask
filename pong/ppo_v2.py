@@ -519,4 +519,4 @@ if __name__ == "__main__":
     plot(train_epoch, test_rewards, save=True)
 
     # Uncomment the following line to record a video after training
-    # record_video(ENV_ID, model, video_length=6000, prefix='ppo_pong')
+    record_video(ENV_ID, model, video_length=6000, prefix='ppo_pong')
