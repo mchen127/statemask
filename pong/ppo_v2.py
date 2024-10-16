@@ -100,7 +100,7 @@ def make_env():  # this function creates a single environment
 
 def normalize(x):
     x -= x.mean()
-    x /= x.std() + 1e-8  # prevent division by zero
+    x /= (x.std() + 1e-8)  # prevent division by zero
     return x
 
 

@@ -1,0 +1,5 @@
+torch==2.0.0            # PyTorch library for deep learning
+gymnasium==0.29.0       # Gymnasium, for creating reinforcement learning environments
+matplotlib==3.7.2       # For plotting the training curve
+numpy==1.25.0           # Required for numerical operations
+argparse                # Built-in, no need to install, used for argument parsing
