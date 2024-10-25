@@ -8,6 +8,8 @@ import json
 from datetime import datetime
 from gymnasium.wrappers import ResizeObservation, GrayScaleObservation
 from stable_baselines3.common.atari_wrappers import NoopResetEnv
+from tqdm import tqdm
+
 
 # Initialize the environment for training
 def make_env(env_id):
@@ -34,7 +36,7 @@ def test(model, env_id, num_episodes=500, save_results=None):
     win_cnt = 0
     lose_cnt = 0
 
-    for episode in range(num_episodes):
+    for episode in tqdm(range(num_episodes), desc="Testing episodes"):
         state, info = env.reset(seed=42)
         done = False
         step_cnt = 0
@@ -44,11 +46,14 @@ def test(model, env_id, num_episodes=500, save_results=None):
             step_cnt += 1
             state = torch.tensor(state, dtype=torch.float32)
             # Reorder dimensions: (batch_size, height, width, channels) -> (batch_size, channels, height, width)
-            state_reorder = state.permute(2, 0, 1)  # Moves the last dimension (channels) to the second position
-            print(f"Reordered shape for CNN: {state_reorder.shape}") 
+            state_reorder = state.permute(2, 0, 1).unsqueeze(
+                0
+            )  # Moves the last dimension (channels) to the second position
+            # print(f"Reordered shape for CNN: {state_reorder.shape}")
             dist, value = model(state_reorder)
             action = dist.sample()
-            next_state, reward, terminated, truncated, info = env.step(action.cpu().numpy())
+            # print(action)
+            next_state, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             episode_reward += reward
             state = next_state
@@ -60,7 +65,9 @@ def test(model, env_id, num_episodes=500, save_results=None):
                 break
 
         # total_reward += episode_reward
-        print(f"Episode {episode}, Total Step: {step_cnt}, Result: {'win' if episode_reward == 1 else 'lose'}, Accumulated Win Rate: {win_cnt / (win_cnt + lose_cnt)}")
+        tqdm.write(
+            f"Episode {episode}, Total Step: {step_cnt}, Result: {'win' if episode_reward == 1 else 'lose'}, Accumulated Win Rate: {win_cnt / (win_cnt + lose_cnt)}"
+        )
 
     avg_win_rate = win_cnt / (win_cnt + lose_cnt)
     print(f"Average win rate over {num_episodes} episodes: {avg_win_rate}")
@@ -69,20 +76,12 @@ def test(model, env_id, num_episodes=500, save_results=None):
     end_time = datetime.now()
 
     results = {
-        "env_id": args.env_id,
-        "num_episodes": args.num_episodes,
-        "avg_reward": avg_win_rate,
+        "env_id": env_id,
+        "num_episodes": num_episodes,
+        "avg_win_rate": avg_win_rate,
         "start_time": start_time.strftime("%Y-%m-%d %H:%M:%S"),
-        "end_time": end_time.strftime("%Y-%m-%d %H:%M:%S")
+        "end_time": end_time.strftime("%Y-%m-%d %H:%M:%S"),
     }
-
-    if args.save_results:
-        # Ensure save directory exists
-        os.makedirs(args.save_results, exist_ok=True)
-        save_path = f"{args.save_results}/{start_time}-{avg_win_rate:.2f}.json"
-        with open(save_path, "w") as f:
-            json.dump(results, f, indent=4)
-        print(f"Results saved to {save_path}")
 
     return results
 
@@ -90,18 +89,46 @@ def test(model, env_id, num_episodes=500, save_results=None):
 if __name__ == "__main__":
     # Set up argument parser
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_path", type=str, required=True, help="Path to the trained model")
-    parser.add_argument("--env_id", type=str, default="ALE/Pong-v5", help="Gym environment ID")
-    parser.add_argument("--num_episodes", type=int, default=50, help="Number of test episodes")
-    parser.add_argument("--save_results", type=str, default="./results", help="File path to save the test results (JSON format)")
+    parser.add_argument(
+        "--model_path", type=str, required=True, help="Path to the trained model"
+    )
+    parser.add_argument(
+        "--env_id", type=str, default="ALE/Pong-v5", help="Gym environment ID"
+    )
+    parser.add_argument(
+        "--num_episodes", type=int, default=50, help="Number of test episodes"
+    )
+    parser.add_argument(
+        "--save_results",
+        type=str,
+        default="./results",
+        help="File path to save the test results (JSON format)",
+    )
 
     # Parse arguments
     args = parser.parse_args()
 
     # Load model
-    model = PPO(num_inputs=1, num_outputs=6, hidden_size=256)  # Adjust these based on your setup
+    model = PPO(
+        num_inputs=1, num_outputs=6, hidden_size=256
+    )  # Adjust these based on your setup
     model.load_state_dict(torch.load(args.model_path)["state_dict"])
     model.eval()
 
     # Run the test
-    test(model, env_id="ALE/Pong-v5", num_episodes=500, save_results=args.save_results)
+    results = test(
+        model,
+        env_id=args.env_id,
+        num_episodes=args.num_episodes,
+        save_results=args.save_results,
+    )
+
+    if args.save_results:
+        # Ensure save directory exists
+        os.makedirs(args.save_results, exist_ok=True)
+        save_path = (
+            f"{args.save_results}/{results.start_time}-{results.avg_win_rate:.2f}.json"
+        )
+        with open(save_path, "w") as f:
+            json.dump(results, f, indent=4)
+        print(f"Results saved to {save_path}")
