@@ -1,8 +1,5 @@
-# !pip install gymnasium stable-baselines3[extra]
-
 import os
 import PIL
-# import gym
 import gymnasium as gym
 import torch
 import base64
@@ -15,8 +12,7 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from torch.distributions import Categorical
 from stable_baselines3.common.vec_env import VecVideoRecorder, SubprocVecEnv
-# from IPython.display import clear_output
-from functools import total_ordering
+
 
 ENV_ID = "Pong-v0"
 H_SIZE = 256 # hidden size, linear units of the output layer
@@ -31,20 +27,20 @@ C_2 = 0.01 # entropy coefficient
 lambda_1 = 1e-4 # lasso regularization
 # eta_origin = 0.20682985172193316 # original policy value
 eta_origin = 0.18054925225205481
-N = 4 # simultaneous processing environments
-# T = 20 # PPO steps
+N = 32 # simultaneous processing environments
 T = 256 # PPO steps
-# M = 16 # mini batch size
+# T = 50 # PPO steps
 M = 64 # mini batch size
 K = 10 # PPO epochs
-T_EPOCHS = 2 # each T_EPOCH
+# T_EPOCHS = 1 # each T_EPOCH
+T_EPOCHS = 50 # each T_EPOCH
 N_TESTS = 20 # do N_TESTS tests
 TARGET_REWARD = 0.9
 TRANSFER_LEARNING = False
-BASELINE_PATH = f"./ppo_test/baseline/Pong-v0_+0.896_12150.dat"
+BASELINE_PATH = "./ppo_test/baseline/Pong-v0_+0.896_12150.dat"
+# PATH="./ppo_test/checkpoints/"
 # BASELINE_PATH = "./ppo_test/baseline/Pong-v0_+0.340_100.dat"
-PATH = f"./ppo_test/checkpoints/Pong-v0_+0.855_19700.dat"
-
+# PATH = "./ppo_test/checkpoints/Pong-v0_+0.855_19700.dat"
 class CNN(nn.Module):
     def __init__(self, num_inputs, num_outputs, hidden_size):
         super(CNN, self).__init__()
@@ -77,8 +73,8 @@ class CNN(nn.Module):
     def forward(self, x):
         value = self.critic(x)
         probs = self.actor(x)
-        distribution = Categorical(probs)
-        return distribution, value
+        dist = Categorical(probs)
+        return dist, value
 
 for func in [
              lambda:os.mkdir(os.path.join('.', 'ppo_test')),
@@ -102,75 +98,80 @@ def normalize(x):
     return x
 
 def test_env(i_episode, env, baseline_model, model, device):
-    print("[test_env] state initializing")
+    print(f"Starting test episode: {i_episode}")
     env.seed(i_episode)
-    print("[test_env] state initializing")
     state = env.reset()
-    print("[test_env] state initializing")
-    state = state[0]
     state = grey_crop_resize(state)
-    print("[test_env] state initializing")
+
     done = False
     total_reward = 0
-
-    print("[test_env] done initializing and entering while loop")
-
     while not done:
         state = torch.FloatTensor(np.copy(state)).unsqueeze(0).to(device)
-        print("[test_env] state unsqueezed")
-        baseline_distribution, _ = baseline_model(state)
-        print("[test_env] baseline model")
-        #baseline_action = baseline_dist.sample().cpu().numpy()[0]
-        baseline_action = np.argmax(baseline_distribution.probs.detach().cpu().numpy()[0])
-        print("[test_env] baseline model action")
 
-        distribution, _ = model(state)
-        #action = dist.sample().cpu().numpy()[0]
-        action = np.argmax(distribution.probs.detach().cpu().numpy()[0])
-        print("[test_env] done action initializing")
-        # 0, 1: No operation
-        # 2, 4: Right
-        # 3, 5: Left
-        if action == 1:
+        baseline_dist, _ = baseline_model(state)
+        baseline_action = baseline_dist.sample().cpu().numpy()[0]
+        # baseline_action = np.argmax(baseline_dist.probs.detach().cpu().numpy()[0])
+
+        dist, _ = model(state)
+        action = dist.sample().cpu().numpy()[0]
+        # action = np.argmax(dist.probs.detach().cpu().numpy()[0])
+
+        if action == 0:
             real_action = baseline_action
         else:
             real_action = np.random.choice(6)
-        print("[test_env] done action choosing")
-        next_state, reward, terminated, truncated, info = env.step(real_action)
-        # Check if the episode is done (terminated or truncated)
+
+        temp = env.step(real_action)
+        # print("type of temp:", temp)
+        # print(len(temp))
+        next_state, reward, terminated, truncated, _ = temp
         done = terminated or truncated
-        # next_state, reward, done, info = env.step(real_action)
-        next_state = next_state[0]
         next_state = grey_crop_resize(next_state)
         state = next_state
         total_reward += reward
-        print("[test_env] done setting for next iteration")
-        # done = terminated or truncated
-    """original code -> bug?
-        done = reward
-    if total_reward == 1:
+        print(f"Reward: {reward}, Total Reward: {total_reward}")
+        # done = reward
+    if total_reward == 21:
         return 1
     else:
         return 0
-    """
-    return (total_reward >= 21)
 
 def plot(train_epoch, rewards, save=True):
-    # clear_output(True)
-    plt.close('all')
-    fig = plt.ion()
-    fig = plt.figure()
-    fig = plt.subplot(1, 1, 1)
-    fig = plt.title('%s: Epoch: %s -> Reward: %s' % (ENV_ID, train_epoch, test_rewards[-1]))
-    fig = plt.ylabel('Reward')
-    fig = plt.xlabel('Epoch')
-    fig = plt.plot(test_rewards)
-    fig = plt.grid()
-    get_fig = plt.gcf()
-    fig = plt.draw()  # draw the plot
-    fig = plt.pause(1)  # show it for 1 second
+    plt.close('all')  # Close any previous plots
+    plt.figure()  # Create a new figure
+
+    # Set up the plot title and labels
+    plt.title('%s: Epoch: %s -> Reward: %s' % (ENV_ID, train_epoch, rewards[-1]))
+    plt.ylabel('Reward')
+    plt.xlabel('Epoch')
+    
+    # Plot the rewards
+    plt.plot(rewards)
+    plt.grid()  # Enable the grid for better readability
+
+    # Display the plot
+    plt.show()
+
+    # Save the plot if the save flag is True
     if save:
-        get_fig.savefig('ppo_test/plots/%s_%d.png' % (ENV_ID, test_rewards[-1]))
+        plt.savefig('ppo_test/plots/%s_%d.png' % (ENV_ID, rewards[-1]))
+
+# def plot(train_epoch, rewards, save=True):
+#     clear_output(True)
+#     plt.close('all')
+#     fig = plt.figure()
+#     fig = plt.ion()
+#     fig = plt.subplot(1, 1, 1)
+#     fig = plt.title('%s: Epoch: %s -> Reward: %s' % (ENV_ID, train_epoch, test_rewards[-1]))
+#     fig = plt.ylabel('Reward')
+#     fig = plt.xlabel('Epoch')
+#     fig = plt.plot(test_rewards)
+#     fig = plt.grid()
+#     get_fig = plt.gcf()
+#     fig = plt.draw()  # draw the plot
+#     fig = plt.pause(1)  # show it for 1 second
+#     if save:
+#         get_fig.savefig('ppo_test/plots/%s_%d.png' % (ENV_ID, test_rewards[-1]))
 
 def record_video(env_id, model, video_length=500, prefix='', video_folder='ppo_test/records/'):
   eval_env = SubprocVecEnv([lambda: gym.make(env_id)])
@@ -191,7 +192,6 @@ def record_video(env_id, model, video_length=500, prefix='', video_folder='ppo_t
 def grey_crop_resize_batch(state):  # deal with batch observations
     states = []
     for i in state:
-        # image = state[0]
         img = Image.fromarray(i)
         grey_img = img.convert(mode='L')
         left = 0
@@ -208,18 +208,12 @@ def grey_crop_resize_batch(state):  # deal with batch observations
     return states_array # B*C*H*W
 
 def grey_crop_resize(state): # deal with single observation
-    # Print contents of state
-    # print("[DEBUG] state:", state)
-    # print("[DEBUG] state type:", type(state))
-    # if isinstance(state, tuple):
-    #     # Print each element in the tuple
-    #     for i, elem in enumerate(state):
-    #         print(f"[DEBUG] state[{i}] type:", type(elem))
-    #         print(f"[DEBUG] state[{i}] content:", elem)
-    img = Image.fromarray(state)
-    print("[grey_crop_resize] img obj set")
+    # print("Type of state:", type(state))
+    # print("state:", state)
+    # state = np.array(state, dtype=np.uint8)
+    # print(type(state))
+    img = Image.fromarray(state[0])
     grey_img = img.convert(mode='L')
-    print("[grey_crop_resize] img obj converted to grey")
     left = 0
     top = 34  # empirically chosen
     right = 160
@@ -242,9 +236,8 @@ def compute_gae(next_value, rewards, masks, values, gamma=G_GAE, lam=L_GAE):
     return returns
 
 
-
 def ppo_iter(states, actions, log_probs, returns, advantage, unnorm_advantage):
-    batch_size = states.size(0) # length of data collected
+    batch_size = states.size(0) # lenght of data collected
 
     for _ in range(batch_size // M):
 
@@ -254,20 +247,19 @@ def ppo_iter(states, actions, log_probs, returns, advantage, unnorm_advantage):
         yield states[rand_start:rand_start+M, :], actions[rand_start:rand_start+M, :], log_probs[rand_start:rand_start+M, :], returns[rand_start:rand_start+M, :], advantage[rand_start:rand_start+M, :], unnorm_advantage[rand_start:rand_start+M, :]
 
 
-
 def ppo_update(states, actions, log_probs, returns, advantages, unnorm_advantage, disc_rewards, LAMBDA, clip_param=E_CLIP):
 
     loss_buff = []
 
     for _ in range(K):
         for state, action, old_log_probs, return_, advantage, unnorm_adv in ppo_iter(states, actions, log_probs, returns, advantages, unnorm_advantage):
-            distribution, value = model(state)
+            dist, value = model(state)
             action = action.reshape(1, len(action)) # take the relative action and take the column
             no_mask_acts = torch.ones_like(action)
-            no_mask_probs = distribution.log_prob(no_mask_acts)
+            no_mask_probs = dist.log_prob(no_mask_acts)
             no_mask_probs = no_mask_probs.reshape(len(old_log_probs), 1)
-
-            new_log_probs = distribution.log_prob(action)
+            
+            new_log_probs = dist.log_prob(action)
             new_log_probs = new_log_probs.reshape(len(old_log_probs), 1) # take the column
             ratio = (new_log_probs - old_log_probs).exp() # new_prob/old_prob
             surr1 = ratio * advantage
@@ -275,9 +267,9 @@ def ppo_update(states, actions, log_probs, returns, advantages, unnorm_advantage
             actor_loss = - torch.min(surr1, surr2).mean()
 
             unnorm_actor_loss = - ratio*unnorm_adv.mean()
-
+            
             critic_loss = (return_ - value).pow(2).mean()
-            entropy = distribution.entropy().mean()
+            entropy = dist.entropy().mean()
 
             num_masks = torch.sum(no_mask_probs.exp()) / (T // M)
 
@@ -294,10 +286,8 @@ def ppo_update(states, actions, log_probs, returns, advantages, unnorm_advantage
 
     LAMBDA -= L_RATE_LAMBDA * (np.mean(loss_buff) - 2 * np.mean(disc_rewards) + 2 * eta_origin)
     LAMBDA = max(LAMBDA, 0)
-
+    
     return LAMBDA
-
-
 
 
 def ppo_train(baseline_model, model, envs, device, use_cuda, test_rewards, test_epochs, train_epoch, best_reward, early_stop = False):
@@ -308,11 +298,11 @@ def ppo_train(baseline_model, model, envs, device, use_cuda, test_rewards, test_
     state = grey_crop_resize_batch(state)
 
     print(len(state))
-    while_loop_cnt = 0
+
+    iter_cnt = 0
 
     while not early_stop:
-        print(f"loop {while_loop_cnt}")
-        while_loop_cnt += 1
+
         log_probs = []
         values = []
         states = []
@@ -321,17 +311,18 @@ def ppo_train(baseline_model, model, envs, device, use_cuda, test_rewards, test_
         masks = []
         disc_rewards = np.zeros(N)
 
-        print("start for loop")
-        for t in range(T):
+        iter_cnt += 1
 
+        print(f"iter_cnt: {iter_cnt}")
+
+        for t in range(T):
             state = torch.FloatTensor(state).to(device)
 
-            baseline_distribution, baseline_value = baseline_model(state)
-            baseline_action = baseline_distribution.sample().cuda() if use_cuda else baseline_distribution.sample()
+            baseline_dist, baseline_value = baseline_model(state)
+            baseline_action = baseline_dist.sample().cuda() if use_cuda else baseline_dist.sample()
 
-
-            distribution, value = model(state)
-            action=distribution.sample().cuda() if use_cuda else distribution.sample()
+            dist, value = model(state)
+            action=dist.sample().cuda() if use_cuda else dist.sample()
 
             baseline_action_copy = baseline_action.cpu().numpy()
             mask_action_copy = action.cpu().numpy()
@@ -344,13 +335,12 @@ def ppo_train(baseline_model, model, envs, device, use_cuda, test_rewards, test_
                 else:
                     real_actions.append(np.random.choice(6))
 
-            next_state, reward, done, _ = envs.step(real_actions) # original
-            # next_state, reward, terminated, truncated, info = envs.step(real_actions)
+            next_state, reward, done, _ = envs.step(real_actions)
             # done = terminated or truncated
             for i in range(N):
-                disc_rewards[i] += np.power(G_GAE, t) * reward[i]
+                disc_rewards[i] += np.pow(G_GAE, t) * reward[i]
             next_state = grey_crop_resize_batch(next_state) # simplify perceptions (grayscale-> crop-> resize) to train CNN
-            log_prob = distribution.log_prob(action) # needed to compute probability ratio r(theta) that prevent policy to vary too much probability related to each action (make the computations more robust)
+            log_prob = dist.log_prob(action) # needed to compute probability ratio r(theta) that prevent policy to vary too much probability related to each action (make the computations more robust)
             log_prob_vect = log_prob.reshape(len(log_prob), 1) # transpose from row to column
             log_probs.append(log_prob_vect)
             action_vect = action.reshape(len(action), 1) # transpose from row to column
@@ -361,8 +351,6 @@ def ppo_train(baseline_model, model, envs, device, use_cuda, test_rewards, test_
             states.append(state)
             state = next_state
 
-
-        print("end for loop")
         next_state = torch.FloatTensor(next_state).to(device) # consider last state of the collection step
         _, next_value = model(next_state) # collect last value effect of the last collection step
         returns = compute_gae(next_value, rewards, masks, values)
@@ -376,13 +364,11 @@ def ppo_train(baseline_model, model, envs, device, use_cuda, test_rewards, test_
         LAMBDA = ppo_update(states, actions, log_probs, returns, advantage, unnorm_advantage, disc_rewards, LAMBDA)
         train_epoch += 1
 
-
         state = envs.reset()
         state = grey_crop_resize_batch(state)
-        print("one trajectory done")
 
         if train_epoch % T_EPOCHS == 0: # do a test every T_EPOCHS times
-            print("start testing")
+
             test_reward = np.mean([test_env(i, env, baseline_model, model, device) for i in range(N_TESTS)]) # do N_TESTS tests and takes the mean reward
             test_rewards.append(test_reward) # collect the mean rewards for saving performance metric
             test_epochs.append(train_epoch)
@@ -406,7 +392,8 @@ def ppo_train(baseline_model, model, envs, device, use_cuda, test_rewards, test_
 
             if test_reward > TARGET_REWARD: # stop training if archive the best
                 early_stop = True
-                
+
+
 if __name__ == "__main__":
 
     use_cuda = torch.cuda.is_available() # Autodetect CUDA
