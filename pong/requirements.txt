@@ -1,7 +1,9 @@
-torch
 numpy
-Pillow
-imageio
-matplotlib
-gymnasium
-stable-baselines3[extra]
+torch>=1.10.0
+gymnasium>=0.26.0
+stable-baselines3>=1.6.0
+tqdm
+gymnasium[atari]
+gymnasium[accept-rom-license]
+gymnasium[other]
+opencv-python

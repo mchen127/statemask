@@ -1,256 +1,138 @@
 import os
-import PIL
-import gymnasium as gym
 import torch
-import base64
-import imageio
-import numpy as np
-from pathlib import Path
-import torch.nn as nn
-import torch.optim as optim
-import matplotlib.pyplot as plt
-from PIL import Image
-# from pyvirtualdisplay import Display
-# from IPython.display import clear_output
-from torch.distributions import Categorical
-# from IPython import display as ipythondisplay
-from stable_baselines3.common.vec_env import VecVideoRecorder, SubprocVecEnv
-from model import CNN
-from gymnasium.wrappers.monitoring import video_recorder
+import gymnasium as gym
+from gymnasium.vector import SyncVectorEnv
+from baseline_model import PPO
+import argparse
+import json
+from datetime import datetime
+from gymnasium.wrappers import ResizeObservation, GrayScaleObservation
+from stable_baselines3.common.atari_wrappers import NoopResetEnv
+from tqdm import tqdm
 
-G_GAE = 0.99 # gamma param for GAE
 
-def make_env():    # this function creates a single environment
-    """
-    Utility function for multiprocessed env.
-
-    :param env_id: (str) the environment ID
-    :param num_env: (int) the number of environments you wish to have in subprocesses
-    :param seed: (int) the inital seed for RNG
-    :param rank: (int) index of the subprocess
-    """
-    def _thunk():
-        env = gym.make("Pong-v0", render_mode="rgb_array")
+# Initialize the environment for training
+def make_env(env_id):
+    def thunk():
+        env = gym.make(env_id, render_mode="rgb_array")
+        env = NoopResetEnv(env)
+        env = ResizeObservation(env, (84, 84))  # Resize to 84x84
+        env = GrayScaleObservation(
+            env, keep_dim=True
+        )  # Convert to grayscale and keep the channel dimension
         return env
-    return _thunk
 
-def grey_crop_resize(state): # deal with single observation
-    img = Image.fromarray(state[0])
-    grey_img = img.convert(mode='L')
-    left = 0
-    top = 34  # empirically chosen
-    right = 160
-    bottom = 194  # empirically chosen
-    cropped_img = grey_img.crop((left, top, right, bottom))
-    resized_img = cropped_img.resize((84, 84))
-    array_2d = np.asarray(resized_img)
-    array_3d = np.expand_dims(array_2d, axis=0)
-    return array_3d # C*H*W
+    return thunk
 
-def test_baseline(i_episode, env, baseline_model, device, record_video=False):
-    if record_video:
-        vid_path = "./recording/vid_base_" + str (i_episode) + ".mp4"
-        vid = video_recorder.VideoRecorder(env, path=vid_path)
-    env.seed(i_episode)
-    state = env.reset()
-    state = grey_crop_resize(state)
-    
-    count = 0
-    total_discounted_reward = 0
-    action_seq = []
-    mask_probs = []
-    total_reward = 0
-    while True:
-        if record_video:
-            vid.capture_frame()
-        state = torch.FloatTensor(np.copy(state)).unsqueeze(0).to(device)
-        baseline_dist, _ = baseline_model(state)
-        print(baseline_dist)
-        # mask_dist, _ = mask_network(state)
-        # mask_probs.append(mask_dist.probs.detach().cpu().numpy()[0])
-        baseline_action = baseline_dist.sample().cpu().numpy()[0]
 
-        # baseline_action = np.argmax(baseline_dist.probs.detach().cpu().numpy()[0])
-        print(baseline_action)
-        action = baseline_action
-        action_seq.append(action)
+def test(model, env_id, num_episodes=500, save_results=None):
+    # Record start time
+    start_time = datetime.now()
 
-        count += 1
-        next_state, reward, terminated, truncated, _ = env.step(action)
-        done = terminated or truncated
-        if reward == -1:
-            total_discounted_reward = - np.power(G_GAE, count)
-            break
-        elif reward == 1:
-            total_discounted_reward = np.power(G_GAE, count)
-            total_reward += reward
-            break
+    # Create environments for testing
+    # envs = SyncVectorEnv([make_env(env_id) for _ in range(num_envs)])
+    env = make_env(env_id)()
 
-        done = reward
+    win_cnt = 0
+    lose_cnt = 0
 
-        next_state = grey_crop_resize(next_state)
-        state = next_state
-        total_reward += reward
+    for episode in tqdm(range(num_episodes), desc="Testing episodes"):
+        state, info = env.reset(seed=42)
+        done = False
+        step_cnt = 0
+        episode_reward = 0
 
-    if total_reward == 1:
-        total_reward = 1
-    else:
-        total_reward = 0
+        while not done:
+            step_cnt += 1
+            state = torch.tensor(state, dtype=torch.float32)
+            # Reorder dimensions: (batch_size, height, width, channels) -> (batch_size, channels, height, width)
+            state_reorder = state.permute(2, 0, 1).unsqueeze(
+                0
+            )  # Moves the last dimension (channels) to the second position
+            # print(f"Reordered shape for CNN: {state_reorder.shape}")
+            dist, value = model(state_reorder)
+            action = dist.sample()
+            # print(action)
+            next_state, reward, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
+            episode_reward += reward
+            state = next_state
+            if reward == 1:
+                win_cnt += 1
+                break
+            elif reward == -1:
+                lose_cnt += 1
+                break
 
-    if record_video:
-        vid.close()
-    return total_reward, total_discounted_reward, count, action_seq, mask_probs
-
-def test_mask(i_episode, env, baseline_model, mask_network, device):
-    vid_path = "./recording/vid_mask_" + str (i_episode) + ".mp4"
-    vid = video_recorder.VideoRecorder(env,path=vid_path)
-
-    env.seed(i_episode)
-    state = env.reset()
-    state = grey_crop_resize(state)
-    
-    count = 0
-    num_mask = 0
-
-    done = False
-    total_reward = 0
-
-    mask_pos = []
-    action_seq = []
-    mask_probs = []
-
-    while not done:
-        vid.capture_frame()
-        state = torch.FloatTensor(np.copy(state)).unsqueeze(0).to(device)
-        baseline_dist, _ = baseline_model(state)
-        mask_dist, _ = mask_network(state)
-        #baseline_action = baseline_dist.sample().cpu().numpy()[0]
-        baseline_action = np.argmax(baseline_dist.probs.detach().cpu().numpy()[0])
-
-        #mask_action = mask_dist.sample().cpu().numpy()[0]
-        mask_action = np.argmax(mask_dist.probs.detach().cpu().numpy()[0])
-        mask_probs.append(mask_dist.probs.detach().cpu().numpy()[0])
+        # total_reward += episode_reward
         
-        if mask_action == 1:
-            action = baseline_action
-        else:
-            action = np.random.choice(6)
-            num_mask += 1
-            mask_pos.append(count)
+        # tqdm.write(
+        #     f"Episode {episode}, Total Step: {step_cnt}, Result: {'win' if episode_reward == 1 else 'lose'}, Accumulated Win Rate: {win_cnt / (win_cnt + lose_cnt)}"
+        # )
 
-        action_seq.append(action)
+    avg_win_rate = win_cnt / (win_cnt + lose_cnt)
+    print(f"Average win rate over {num_episodes} episodes: {avg_win_rate}")
 
-        count += 1
-        next_state, reward, done, _ = env.step(action)
+    # Record end time
+    end_time = datetime.now()
 
-        done = reward
+    results = {
+        "env_id": env_id,
+        "num_episodes": num_episodes,
+        "avg_win_rate": avg_win_rate,
+        "start_time": start_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "end_time": end_time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
-        next_state = grey_crop_resize(next_state)
-        state = next_state
-        total_reward += reward
+    return results
+
+
+if __name__ == "__main__":
+    start_time_ = datetime.now()
+    formatted_start_time = start_time_.strftime("%Y-%m-%d_%H:%M:%S")
     
-    if total_reward == 1:
-        total_reward = 1
-    else:
-        total_reward = 0
-    
-    vid.close()
-    return total_reward, count, num_mask, mask_pos, action_seq, mask_probs
+    # Set up argument parser
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--model_path", type=str, required=True, help="Path to the trained model"
+    )
+    parser.add_argument(
+        "--env_id", type=str, default="ALE/Pong-v5", help="Gym environment ID"
+    )
+    parser.add_argument(
+        "--num_episodes", type=int, default=50, help="Number of test episodes"
+    )
+    parser.add_argument(
+        "--save_results",
+        type=str,
+        default="./results",
+        help="File path to save the test results (JSON format)",
+    )
 
-H_SIZE = 256
+    # Parse arguments
+    args = parser.parse_args()
 
-N_TESTS = 10
+    # Load model
+    model = PPO(
+        num_inputs=1, num_outputs=6, hidden_size=256
+    )  # Adjust these based on your setup
+    model.load_state_dict(torch.load(args.model_path)["state_dict"])
+    model.eval()
 
-"""
-if os.path.isdir("recording"):
-    os.system("rm -rf recording")
+    # Run the test
+    results = test(
+        model,
+        env_id=args.env_id,
+        num_episodes=args.num_episodes,
+        save_results=args.save_results,
+    )
 
-
-os.system("mkdir recording")
-"""
-# env = gym.make("Pong-v0").env
-env = gym.make("Pong-v0", render_mode="rgb_array")
-
-num_inputs = 1
-num_outputs = env.action_space.n
-
-
-use_cuda = torch.cuda.is_available()
-device = torch.device("cuda" if use_cuda else "cpu")
-# device = torch.device("cpu")
-
-BASELINE_PATH = "./ppo_test/baseline/Pong-v0_+0.896_12150.dat"
-
-baseline_model = CNN(num_inputs, num_outputs, H_SIZE).to(device)
-if use_cuda:
-    checkpoint = torch.load(BASELINE_PATH)
-else:
-    checkpoint = torch.load(BASELINE_PATH, map_location=torch.device('cpu'))
-baseline_model.load_state_dict(checkpoint['state_dict'])
-
-# PATH = "./ppo_test/checkpoints/Pong-v0_+0.850_7200.dat"
-# mask_network = CNN(num_inputs, 2, H_SIZE).to(device)
-# if use_cuda:
-#     checkpoint = torch.load(PATH)
-# else:
-#     checkpoint = torch.load(PATH, map_location=torch.device('cpu'))
-# mask_network.load_state_dict(checkpoint['state_dict'])
-
-
-tmp_rewards = []
-tmp_counts = []
-tmp_disc_rewards = []
-
-
-print("=====Test baseline model=====")
-for i in range(N_TESTS):
-    total_reward, total_disc_reward, count, _, _ = test_baseline(i, env, baseline_model, device, record_video=True)
-    print("Test " + str(i) + " :")
-    print("reward: " + str(total_reward))
-    tmp_rewards.append(total_reward)
-    print("discounted reward: " + str(total_disc_reward))
-    tmp_disc_rewards.append(total_disc_reward)
-    print("episode length: " + str(count))
-    tmp_counts.append(count)
-    print("current reward mean ", np.mean(tmp_rewards))
-    print("current discounted reward mean ", np.mean(tmp_disc_rewards))
-
-
-print("Average winning rate: ", np.mean(tmp_rewards))
-print("Policy value: ", np.mean(tmp_disc_rewards))   #500 tests avg policy value:  0.20682985172193316
-
-
-# print("=====Test mask network=====")
-
-# tmp_rewards = []
-# tmp_counts = []
-# tmp_num_masks = []
-
-# for i in range(N_TESTS):
-#     total_reward, count, num_mask, mask_pos, action_seq, mask_probs = test_mask(i, env, baseline_model, mask_network, device)
-#     tmp_rewards.append(total_reward)
-# print("Average winning rate: ", np.mean(tmp_rewards))
-
-# tmp_rewards = []
-# tmp_disc_rewards = []
-# print("=====Generating fid tests=====")
-# for i in range(N_TESTS):
-#     total_reward, total_disc_reward, count, action_seq, mask_probs = test_baseline(i, env, baseline_model, device)
-#     tmp_rewards.append(total_reward)
-#     #print("current reward mean ", np.mean(tmp_rewards))
-#     tmp_counts.append(count)
-#     tmp_disc_rewards.append(total_disc_reward)
-
-#     eps_len_filename = "./recording/eps_len_" + str(i) + ".out" 
-#     np.savetxt(eps_len_filename, [count])
-
-#     act_seq_filename = "./recording/act_seq_" + str(i) + ".out" 
-#     np.savetxt(act_seq_filename, action_seq)
-
-#     mask_probs_filename = "./recording/mask_probs_" + str(i) + ".out" 
-#     np.savetxt(mask_probs_filename, mask_probs)
-
-# print("Average winning rate: ", np.mean(tmp_rewards))
-# print("Policy value: ", np.mean(tmp_disc_rewards))
-
-# np.savetxt("./recording/reward_record.out", tmp_rewards)
+    if args.save_results:
+        # Ensure save directory exists
+        os.makedirs(args.save_results, exist_ok=True)
+        save_path = (
+            f"{args.save_results}/{formatted_start_time}.jsonl"
+        )
+        with open(save_path, "w") as f:
+            json.dump(results, f, indent=4)
+        print(f"Results saved to {save_path}")
