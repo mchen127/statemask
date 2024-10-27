@@ -1,0 +1,5 @@
+{"env_id": "ALE/Pong-v5", "num_episodes": 50, "avg_win_rate": 0.04, "start_time": "2024-10-27 15:25:14", "end_time": "2024-10-27 15:25:19"}
+{"env_id": "ALE/Pong-v5", "num_episodes": 50, "avg_win_rate": 0.02, "start_time": "2024-10-27 15:25:19", "end_time": "2024-10-27 15:25:23"}
+{"env_id": "ALE/Pong-v5", "num_episodes": 50, "avg_win_rate": 0.0, "start_time": "2024-10-27 15:25:24", "end_time": "2024-10-27 15:25:28"}
+{"env_id": "ALE/Pong-v5", "num_episodes": 50, "avg_win_rate": 0.0, "start_time": "2024-10-27 15:25:28", "end_time": "2024-10-27 15:25:33"}
+{"env_id": "ALE/Pong-v5", "num_episodes": 500, "avg_win_rate": 0.03, "start_time": "2024-10-27 15:25:33", "end_time": "2024-10-27 15:26:16"}

@@ -11,8 +11,8 @@ from stable_baselines3.common.atari_wrappers import NoopResetEnv
 import argparse
 import time
 from datetime import datetime
-from baseline_model import PPO
-from test import test
+from model import PPO
+from statemask_test import test_statemask
 from tqdm import tqdm
 
 
@@ -103,20 +103,29 @@ def parse_args():
     parser.add_argument(
         "--vf_coef", type=float, default=0.5, help="coefficient of the value function"
     )
-    
+
     # Add lasso_coef and learning_rate_lagrange_multiplier
     # ================================================================================================================
     parser.add_argument(
-        "--lasso_coef", type=float, default=0.0001, help="coefficient of the Lasso regularization"
+        "--lasso_coef",
+        type=float,
+        default=0.0001,
+        help="coefficient of the Lasso regularization",
     )
     parser.add_argument(
-        "--learning_rate_lagrange_multiplier", type=float, default=0.001, help="coefficient of the Lasso regularization"
+        "--learning_rate_lagrange_multiplier",
+        type=float,
+        default=0.001,
+        help="coefficient of the Lasso regularization",
     )
     parser.add_argument(
-        "--baseline_exp_total_reward", type=float, default=0.001, help="coefficient of the Lasso regularization"
+        "--baseline_exp_total_reward",
+        type=float,
+        default=0.001,
+        help="coefficient of the Lasso regularization",
     )
     # ================================================================================================================
-    
+
     parser.add_argument(
         "--max_grad_norm",
         type=float,
@@ -131,10 +140,22 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--save_results",
+        "--result_path",
         type=str,
         default="./results",
         help="File path to save the test results (JSON format)",
+    )
+    parser.add_argument(
+        "--baseline_model_path",
+        type=str,
+        default="./checkpoints/baseline/baseline_2024-10-27_12:57:15_0.036.pth",
+        help="File path to save the model",
+    )
+    parser.add_argument(
+        "--statemask_model_path",
+        type=str,
+        default="./checkpoints/statemask",
+        help="File path to save the model",
     )
     # Parse arguments
     args = parser.parse_args()
@@ -175,9 +196,15 @@ def train(args):
     num_inputs = envs.single_observation_space.shape[2]
     num_outputs = envs.single_action_space.n
 
-    # Initialize PPO model
-    model = PPO(num_inputs=num_inputs, num_outputs=num_outputs).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+    # Initialize PPO baseline agent
+    checkpoint_path = args.baseline_model_path
+    baseline_model = PPO(num_inputs=num_inputs, num_outputs=num_outputs).to(device)
+    baseline_model.load_state_dict(torch.load(checkpoint_path))
+    baseline_model.eval()
+
+    # Initialize satemask agent
+    statemask_model = PPO(num_inputs=num_inputs, num_outputs=2).to(device)
+    optimizer = optim.Adam(statemask_model.parameters(), lr=args.learning_rate)
 
     obs = torch.zeros(
         (args.num_steps, args.num_envs) + envs.single_observation_space.shape
@@ -227,21 +254,31 @@ def train(args):
                 # Reorder dimensions: (batch_size, height, width, channels) -> (batch_size, channels, height, width)
                 next_obs_reorder = next_obs.permute(0, 3, 1, 2)
                 # print(f"Reordered shape for CNN: {next_obs_reorder.shape}")  # Should print (8, 1, 84, 84)
-                dist, value = model(next_obs_reorder)
-                # print("dist", dist)
-                # print("value", value)
-                values[step] = value.flatten()
+                baseline_dist, baseline_value = baseline_model(next_obs_reorder)
+                # values[step] = baseline_value.flatten()
+                statemask_dist, statemask_value = statemask_model(next_obs_reorder)
 
             # get actions and log probabilities
-            action = dist.sample()
-            logprob = dist.log_prob(action)
-            actions[step] = action
+            baseline_action = baseline_dist.sample()
+            baseline_action_copy = baseline_action.cpu().numpy()
+            statemask_action = statemask_dist.sample()
+            statemask_action_copy = statemask_action.cpu().numpy()
+
+            actions[step] = statemask_action
+            logprob = statemask_dist.log_prob(statemask_action)
             logprobs[step] = logprob
 
+            # Determine actual action
+            real_action = []
+            for i in range(args.num_envs):
+                real_action.append(
+                    baseline_action_copy[i]
+                    if statemask_action_copy[i] == 0
+                    else np.random.choice(num_outputs)
+                )
+
             # perform next step
-            next_obs, reward, terminates, truncates, infos = envs.step(
-                action.cpu().numpy()
-            )
+            next_obs, reward, terminates, truncates, infos = envs.step(real_action)
             # print(terminates)
             done = torch.tensor(
                 list(map(lambda x, y: int(x or y), terminates, truncates))
@@ -258,7 +295,7 @@ def train(args):
         with torch.no_grad():
             # bootstrap value if not done
             next_obs_reorder = next_obs.permute(0, 3, 1, 2)
-            next_values_of_T = model.get_value(next_obs_reorder).reshape(1, -1)
+            next_values_of_T = baseline_model.get_value(next_obs_reorder).reshape(1, -1)
             # compute advantages with current critic
             estimated_returns = torch.zeros_like(rewards).to(device)
             advantages = torch.zeros_like(rewards).to(device)
@@ -293,23 +330,27 @@ def train(args):
         # ||   Update for 4 epochs   ||
         # =============================
         batch_indices = np.arange(args.batch_size)
+        loss_buffer = []
         clipfracs = []
         for epoch in range(args.update_epochs):
             np.random.shuffle(batch_indices)
-            # update
+            # Update
             for begin in range(0, args.batch_size, args.minibatch_size):
                 end = begin + args.minibatch_size
                 minibatch_indices = batch_indices[begin:end]
-                # get new dist, value,
-                minib_obs_reorder = b_obs[minibatch_indices].permute(0, 3, 1, 2)
-                new_dists, new_values = model(minib_obs_reorder)
+                # Get new dist, value, action, log probabilities
+                minibatch_obs_reorder = b_obs[minibatch_indices].permute(0, 3, 1, 2)
+                new_dists, new_values = statemask_model(minibatch_obs_reorder)
                 new_actions = new_dists.sample()
+                no_mask_actions = torch.zeros_like(new_actions)
+                no_mask_logprobs = new_dists.log_prob(no_mask_actions)
+
                 new_logprobs = new_dists.log_prob(new_actions)
                 logratio = new_logprobs - b_logprobs[minibatch_indices]
                 importance_sampling_ratio = (logratio).exp()
 
                 with torch.no_grad():
-                    # calculate approx_kl http://joschu.net/blog/kl-approx.html
+                    # Calculate approx_kl http://joschu.net/blog/kl-approx.html
                     old_approx_kl = (-logratio).mean()
                     approx_kl = ((importance_sampling_ratio - 1) - logratio).mean()
                     clipfracs += [
@@ -319,12 +360,13 @@ def train(args):
                         .item()
                     ]
 
-                # normalize advantages
+                # Normalize advantages
+                unnorm_minibatch_advantages = b_advantages[minibatch_indices]
                 minibatch_advantages = b_advantages[minibatch_indices]
                 if args.norm_adv:
-                    minibatch_advantages = (minibatch_advantages - minibatch_advantages.mean()) / (
-                        minibatch_advantages.std() + 1e-8
-                    )
+                    minibatch_advantages = (
+                        minibatch_advantages - minibatch_advantages.mean()
+                    ) / (minibatch_advantages.std() + 1e-8)
 
                 # Policy loss
                 actor_loss1 = -minibatch_advantages * importance_sampling_ratio
@@ -336,7 +378,7 @@ def train(args):
                 # Value loss
                 new_values = new_values.view(-1)
                 if args.clip_vloss:
-                    value_loss_unclipped = (
+                    critic_loss_unclipped = (
                         new_values - b_estimated_returns[minibatch_indices]
                     ) ** 2
                     value_clipped = b_values[minibatch_indices] + torch.clamp(
@@ -344,34 +386,54 @@ def train(args):
                         -args.clip_coef,
                         args.clip_coef,
                     )
-                    value_loss_clipped = (
+                    critic_loss_clipped = (
                         value_clipped - b_estimated_returns[minibatch_indices]
                     ) ** 2
-                    value_loss_max = torch.max(value_loss_unclipped, value_loss_clipped)
-                    value_loss = 0.5 * value_loss_max.mean()
+                    critic_loss_max = torch.max(
+                        critic_loss_unclipped, critic_loss_clipped
+                    )
+                    critic_loss = 0.5 * critic_loss_max.mean()
                 else:
-                    value_loss = (
+                    critic_loss = (
                         0.5
                         * (
                             (new_values - b_estimated_returns[minibatch_indices]) ** 2
                         ).mean()
                     )
 
-                # entropy bonus
+                # Entropy bonus
                 entropy = new_dists.entropy()
                 entropy_loss = entropy.mean()
 
-                # total loss
-                loss = actor_loss + args.vf_coef * value_loss - args.ent_coef * entropy_loss
-                
+                # Number of statemasks
+                num_masks = torch.sum(no_mask_logprobs.exp()) / (args.minibatch_size)
+
+                # Total loss
+                if lagrange_multiplier > 1:
+                    actor_loss *= -1
+
+                loss = (
+                    actor_loss
+                    + args.vf_coef * critic_loss
+                    - args.ent_coef * entropy_loss
+                    + args.lasso_coef * num_masks
+                )
+
                 # Print the losses
-                print(f"Batch {batch_cnt}, Epoch {epoch}, Policy Loss: {pg_loss.item():.4f}, Value Loss: {value_loss.item():.4f}, Total Loss: {loss.item():.4f}")
-                
-                # update
+                print(
+                    f"Batch {batch_cnt}, Epoch {epoch}, Actor Loss: {actor_loss.item():.4f}, Crtitc Loss: {critic_loss.item():.4f}, Entropy Loss: {entropy_loss.item():.4f}, Num masks: {num_masks.item():.4f}, Total Loss: {loss.item():.4f}"
+                )
+
+                # Perform update
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                nn.utils.clip_grad_norm_(
+                    statemask_model.parameters(), args.max_grad_norm
+                )
                 optimizer.step()
+
+                #
+                loss_buffer.append(unnorm_minibatch_advantages.cpu().detach().numpy())
 
             if args.target_kl is not None:
                 if approx_kl > args.target_kl:
@@ -380,32 +442,46 @@ def train(args):
             # validation
             if args.mode == "default_train":
                 # Call test function for validation
-                validation_results = test(
-                    model, env_id=args.env_id, num_episodes=50, save_results="./statemask_results"
+                validation_results = test_statemask(
+                    baseline_model=baseline_model,
+                    statemask_model=statemask_model,
+                    env_id=args.env_id,
+                    num_episodes=50,
                 )
-                os.makedirs(args.save_results, exist_ok=True)
-                save_path = f"{args.save_results}/{formatted_start_time}.jsonl"
+                os.makedirs(args.result_path, exist_ok=True)
+                save_path = f"{args.result_path}/{formatted_start_time}.jsonl"
                 append_json_to_file(save_path, validation_results)
                 print(
                     f"Validation results after batch {batch_cnt}, epoch {epoch}: {validation_results}"
                 )
-                
-        lagrange_multiplier -= args.learning_rate_lagrange_multiplier * ()
+
+        lagrange_multiplier -= args.learning_rate_lagrange_multiplier * (
+            2 * args.baseline_exp_total_reward
+            + np.mean(loss_buffer)
+            - np.mean(estimated_returns.cpu().numpy())
+        )
         lagrange_multiplier = max(0, lagrange_multiplier)
-        
+
         print(f"Batch {batch_cnt} completed.")
-        
-        
-    validation_results = test(
-        model, env_id=args.env_id, num_episodes=500, save_results="./results"
+
+    evaluation_results = test_statemask(
+        baseline_model=baseline_model,
+        statemask_model=statemask_model,
+        env_id=args.env_id,
+        num_episodes=500,
     )
-    os.makedirs(args.save_results, exist_ok=True)
-    save_path = f"{args.save_results}/{formatted_start_time}.jsonl"
-    append_json_to_file(save_path, validation_results)
+
+    # Save evaluation results
+    os.makedirs(args.result_path, exist_ok=True)
+    result_save_path = f"{args.result_path}/{formatted_start_time}.jsonl"
+    append_json_to_file(result_save_path, evaluation_results)
     print(
-        f"Validation results after batch {batch_cnt}, epoch {epoch}: {validation_results}"
+        f"Evaluation results after batch {batch_cnt}, epoch {epoch}: {evaluation_results}"
     )
-    torch.save(model.state_dict(), f"./checkpoints/ppo_baseline_{validation_results['avg_win_rate']}.pth")
+    # Save PPO baseline model checkpoint
+    os.makedirs(args.statemask_model_path, exist_ok=True)
+    model_save_path = f"{args.statemask_model_path}/baseline_{formatted_start_time}_{evaluation_results['avg_win_rate']}.pth"
+    torch.save(statemask_model.state_dict(), model_save_path)
     print("Training completed and model saved.")
 
 

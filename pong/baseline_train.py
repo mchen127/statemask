@@ -11,8 +11,8 @@ from stable_baselines3.common.atari_wrappers import NoopResetEnv
 import argparse
 import time
 from datetime import datetime
-from baseline_model import PPO
-from test import test
+from model import PPO
+from baseline_test import test_baseline
 from tqdm import tqdm
 
 
@@ -115,12 +115,17 @@ def parse_args():
         default=None,
         help="the target KL divergence threshold",
     )
-
     parser.add_argument(
-        "--save_results",
+        "--result_path",
         type=str,
         default="./results",
         help="File path to save the test results (JSON format)",
+    )
+    parser.add_argument(
+        "--baseline_model_path",
+        type=str,
+        default="./checkpoints/baseline",
+        help="File path to save the model",
     )
     # Parse arguments
     args = parser.parse_args()
@@ -319,7 +324,7 @@ def train(args):
                 # Value loss
                 new_values = new_values.view(-1)
                 if args.clip_vloss:
-                    value_loss_unclipped = (
+                    critic_loss_unclipped = (
                         new_values - b_estimated_returns[minibatch_indices]
                     ) ** 2
                     value_clipped = b_values[minibatch_indices] + torch.clamp(
@@ -327,13 +332,13 @@ def train(args):
                         -args.clip_coef,
                         args.clip_coef,
                     )
-                    value_loss_clipped = (
+                    critic_loss_clipped = (
                         value_clipped - b_estimated_returns[minibatch_indices]
                     ) ** 2
-                    value_loss_max = torch.max(value_loss_unclipped, value_loss_clipped)
-                    value_loss = 0.5 * value_loss_max.mean()
+                    critic_loss_max = torch.max(critic_loss_unclipped, critic_loss_clipped)
+                    critic_loss = 0.5 * critic_loss_max.mean()
                 else:
-                    value_loss = (
+                    critic_loss = (
                         0.5
                         * (
                             (new_values - b_estimated_returns[minibatch_indices]) ** 2
@@ -345,10 +350,10 @@ def train(args):
                 entropy_loss = entropy.mean()
 
                 # total loss
-                loss = actor_loss + args.vf_coef * value_loss - args.ent_coef * entropy_loss
+                loss = actor_loss + args.vf_coef * critic_loss - args.ent_coef * entropy_loss
                 
                 # Print the losses
-                print(f"Batch {batch_cnt}, Epoch {epoch}, Policy Loss: {pg_loss.item():.4f}, Value Loss: {value_loss.item():.4f}, Total Loss: {loss.item():.4f}")
+                print(f"Batch {batch_cnt}, Epoch {epoch}, Policy Loss: {actor_loss.item():.4f}, Value Loss: {critic_loss.item():.4f}, Total Loss: {loss.item():.4f}")
                 
                 # update
                 optimizer.zero_grad()
@@ -363,28 +368,34 @@ def train(args):
             # validation
             if args.mode == "default_train":
                 # Call test function for validation
-                validation_results = test(
-                    model, env_id=args.env_id, num_episodes=50, save_results="./results"
+                validation_results = test_baseline(
+                    model, env_id=args.env_id, num_episodes=50
                 )
-                os.makedirs(args.save_results, exist_ok=True)
-                save_path = f"{args.save_results}/{formatted_start_time}.jsonl"
-                append_json_to_file(save_path, validation_results)
+                # Save validation results
+                os.makedirs(args.result_path, exist_ok=True)
+                result_save_path = f"{args.result_path}/{formatted_start_time}.jsonl"
+                append_json_to_file(result_save_path, validation_results)
                 print(
                     f"Validation results after batch {batch_cnt}, epoch {epoch}: {validation_results}"
                 )
 
         print(f"Batch {batch_cnt} completed.")
 
-    validation_results = test(
-        model, env_id=args.env_id, num_episodes=500, save_results="./results"
+    evaluation_results = test_baseline(
+        model=model, env_id=args.env_id, num_episodes=500
     )
-    os.makedirs(args.save_results, exist_ok=True)
-    save_path = f"{args.save_results}/{formatted_start_time}.jsonl"
-    append_json_to_file(save_path, validation_results)
+    
+    # Save evaluation results
+    os.makedirs(args.result_path, exist_ok=True)
+    result_save_path = f"{args.result_path}/{formatted_start_time}.jsonl"
+    append_json_to_file(result_save_path, evaluation_results)
     print(
-        f"Validation results after batch {batch_cnt}, epoch {epoch}: {validation_results}"
+        f"Evaluation results after batch {batch_cnt}, epoch {epoch}: {evaluation_results}"
     )
-    torch.save(model.state_dict(), f"./checkpoints/ppo_baseline_{validation_results['avg_win_rate']}.pth")
+    # Save PPO baseline model checkpoint
+    os.makedirs(args.baseline_model_path, exist_ok=True)
+    model_save_path = f"{args.baseline_model_path}/baseline_{formatted_start_time}_{evaluation_results['avg_win_rate']}.pth"
+    torch.save(model.state_dict(), model_save_path)
     print("Training completed and model saved.")
 
 
